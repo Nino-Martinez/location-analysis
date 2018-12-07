@@ -1,0 +1,919 @@
+# Load libraries
+
+dim(sold_after)
+dim(sold_prior)
+
+library(sf)
+library(sp)
+library(tidyverse)
+library(dplyr)
+library(tmap)
+library(leaflet)
+library(rgeos)
+library(rgdal)
+library(tbart)
+library(s)
+
+require(RColorBrewer)
+require(GISTools)
+
+
+
+# Read in assessment data
+
+assess <- read.csv("assessment18_19.csv")
+
+# Filter tax parcels for vacant residential that are geocoded
+
+
+vacant_analysis <- c("RESIDENTIAL VACANT LAND", "RESIDENTIAL VACANT LAND WITH SMALL IMPROVEMENTS")
+
+vacant_assess <- assess %>% filter(PROPERTY.CLASS.DESCRIPTION %in% vacant_analysis) 
+dim(vacant_assess)
+
+vacant_geocode <- vacant_assess[!(is.na(vacant_assess$CENSUS.TRACT) | vacant_assess$CENSUS.TRACT==""),]
+dim(vacant_geocode)
+
+vacant_buff <- vacant_geocode %>% filter(OWNER1 == "CITY OF BUFFALO")
+dim(vacant_buff)
+
+# Convert vacant dataframe into spatial object
+colnames(buffalo_2016_df)
+buff_2016 <- as.data.frame(buffalo_2016_df)
+
+# Displacement Risk
+colnames(disinvested_gent)
+disinvested_rank <- disinvested_gent %>% select(4,25,40:61) 
+disinvested_rank_df <- as.data.frame(disinvested_rank)
+gent_displace <- full_join(displace_sold_df, disinvested_rank_df, by = c("GEOID10"= "GEOID10")) %>%
+  mutate(diff_sale_value = sale_after - value_before,
+         per_sale_value = (diff_sale_value/value_before)*100)
+
+gent_summary <- full_join(gent_displace, property_summary, by = c("NAME10.x"="CENSUS.TRACT")) %>% 
+  filter(!is.na(NAME10.y))
+
+PT <- buff_2016[,c(4,13)]
+
+gent_summary.2 <- full_join(gent_displace, PT, by = c("GEOID10"= "GEOID10"))
+
+
+gent_summary_rank <- gent_summary.2 %>% mutate(gent_white = white_change*157,
+                                             gent_pov = Per_Pov_Chg*165,
+                                             gent_adult = per_25_44_change*239,
+                                             gent_college = college_change*-429,
+                                             gent_own = own_occ_change_per*-526,
+                                             gent_occ = Per_Occ_Mgt_Chg*-526,
+                                             gent_pop = total_pop_chg*-2.72,
+                                             gent_rent = rent_change*51.6,
+                                             value_added = gent_white +
+                                               gent_pov + gent_adult + gent_college +
+                                               gent_own + gent_pop + gent_rent) %>%
+  filter(value_added > 0)
+                                  
+value_added_map <- tm_shape(gent_summary_rank) + tm_polygons("value_added", style = "jenks",
+                                         palette = "seq",
+                                         n = 7,
+                                         title = "Value Added",
+                                         border.alpha = .50) + 
+  tm_shape(neighborhoods) + tm_polygons(alpha = 0, border.col = "black") +
+  tm_layout(aes.palette = list(seq ="YlGn"), legend.outside = TRUE, main.title = "Value Added", main.title.size = .75)
+value_added_map
+                                          
+                                                 
+
+risk <- gent_summary_rank %>% mutate(own_high =
+                                   ifelse(SMOCAPI_35plus_per_16 < 15.88, 1,
+                                          ifelse(between(SMOCAPI_35plus_per_16, 15.88, 21.65), 2,
+                                                 ifelse(between(SMOCAPI_35plus_per_16,21.65,31.27), 3,
+                                                        ifelse(SMOCAPI_35plus_per_16 > 31.27,4,0)))),
+                                 rent_high =
+                                   ifelse(GRAPI_35plus_per_16 < 38.30, 1,
+                                          ifelse(between(GRAPI_35plus_per_16,38.30,48.60), 2,
+                                                 ifelse(between(GRAPI_35plus_per_16,48.60,58.60), 3,
+                                                        ifelse(GRAPI_35plus_per_16 > 58.60, 4, 0)))),
+                                 long_own =
+                                   ifelse(move_in_27plus_yrs_per_16 < 11.03, 1,
+                                          ifelse(between(move_in_27plus_yrs_per_16, 11.03,14.35),2,
+                                                 ifelse(between(move_in_27plus_yrs_per_16,14.35,22.82),3,
+                                                        ifelse(move_in_27plus_yrs_per_16 > 22.82, 4,0)))),
+                                 renters =
+                                   ifelse(rent_occ_per_16 < 50.70, 1,
+                                          ifelse(between(rent_occ_per_16,50.7,59.8), 2,
+                                                 ifelse(between(rent_occ_per_16,59.8,65.85),3,
+                                                        ifelse(rent_occ_per_16 > 65.85,4,0)))),
+                                 elderly =
+                                   ifelse(per_65_plus_16 < 8.113, 1,
+                                          ifelse(between(per_65_plus_16,8.113,12.229), 2,
+                                                 ifelse(between(per_65_plus_16,12.229,15.165), 3,
+                                                        ifelse(per_65_plus_16 > 15.165, 4, 0)))),
+                                 market_value =
+                                   ifelse(per_sale_change < 1.937, 1,
+                                          ifelse(between(per_sale_change, 1.937,15.590), 2,
+                                                 ifelse(between(per_sale_change,15.590,62.186),3,
+                                                        ifelse(per_sale_change > 62.186, 4, 0)))),
+                                 disp.rank =  renters + elderly + long_own + rent_high + own_high,
+                                 risk = diff_sale_value * disp.rank) %>%
+  filter(risk > 0)
+
+dim(risk)
+
+colnames(gent_summary_rank)
+
+value_prior_map <- tm_shape(gent_summary_rank) + tm_polygons("value_before", style = "jenks",
+                                         palette = "seq",
+                                         n = 7,
+                                         title = "Avg Home Value",
+                                         border.alpha = .50) + 
+  tm_shape(neighborhoods) + tm_polygons(alpha = 0, border.col = "black") +
+  tm_layout(aes.palette = list(seq ="YlGn"), legend.outside = TRUE, main.title = "Sold Prior 2011", main.title.size = .75)
+
+value_prior_map
+
+sold_after_map <- tm_shape(gent_summary_rank) + tm_polygons("sale_after", style = "jenks",
+                                                             palette = "seq",
+                                                             n = 7,
+                                                             title = "Avg Sale Price",
+                                                             border.alpha = .50) + 
+  tm_shape(neighborhoods) + tm_polygons(alpha = 0, border.col = "black") +
+  tm_layout(aes.palette = list(seq ="YlGn"), legend.outside = TRUE, main.title = "Sold After 2011", main.title.size = .75)
+
+sold_after_map
+
+per_chg_map <- tm_shape(gent_summary_rank) + tm_polygons("per_sale_value", style = "jenks",
+                                                            palette = "div",
+                                                            n = 7,
+                                                            title = "% Change",
+                                                            border.alpha = .50) + 
+  tm_shape(neighborhoods) + tm_polygons(alpha = 0, border.col = "black") +
+  tm_layout(aes.palette = list(seq = "plasma", div = c("BrBG")), legend.outside = TRUE, main.title = "Value Before and Sold After Assessment", main.title.size = .75)
+
+per_chg_map
+
+dim(risk)
+
+disp_rank_map <- tm_shape(risk) + tm_polygons("disp.rank", style = "jenks",
+                                         palette = "seq",
+                                         n = 7,
+                                         title = "Risk Rank",
+                                         border.alpha = .50) + 
+  tm_shape(neighborhoods) + tm_polygons(alpha = 0, border.col = "black") +
+  tm_layout(aes.palette = list(seq ="OrRd"), legend.outside = TRUE, main.title = "Displacement Rank", main.title.size = .75)
+
+disp_rank_map
+
+risk_map <- tm_shape(risk) + tm_polygons("risk", style = "jenks",
+                                         palette = "seq",
+                                         n = 7,
+                                         title = "% Change * Risk Rank",
+                                         border.alpha = .50) + 
+  tm_shape(neighborhoods) + tm_polygons(alpha = 0, border.col = "black") +
+  tm_layout(aes.palette = list(seq ="OrRd"), legend.outside = TRUE, main.title = "Displacement Risk", main.title.size = .75)
+risk_map
+risk_sp <- as(risk, "Spatial")
+# Join Risk dataframe with geocoded vacant df
+
+risk_vacant <- full_join(vacant_geocode, risk, by = c("CENSUS.TRACT"="NAME10.x")) %>% 
+  filter(!is.na(NAME10.y))
+
+risk_vacant_buff <- risk_vacant %>% filter(OWNER1 == "CITY OF BUFFALO")
+
+risk_vacant_coords <- risk_vacant[,c(45,44)]
+risk_vacant_buff_coords <- risk_vacant_buff[,c(45,44)]
+
+risk_vacant_sp <- SpatialPointsDataFrame(coords = risk_vacant_coords, data = risk_vacant,
+                                         proj4string = CRS("+proj=tmerc +lat_0=40 +lon_0=-78.58333333333333 +k=0.9999375 +x_0=350000 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs") )
+
+risk_vacant_buff_sp <- SpatialPointsDataFrame(coords = risk_vacant_buff_coords, data = risk_vacant_buff,
+                                         proj4string = CRS("+proj=tmerc +lat_0=40 +lon_0=-78.58333333333333 +k=0.9999375 +x_0=350000 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs") )
+
+save(risk_vacant_sp, file = "vacant_risk.Rdata")
+save(risk_vacant_buff_sp, file = "vacant_risk_buff.Rdata")
+dim(risk_vacant_buff_sp)
+0#Try allocations model
+tm_shape(risk_vacant_buff_sp) +tm_dots()
+vacant__buff_allocation <- allocations(risk_vacant_buff_sp, p = 5)
+vacant_buff_id <- unique(vacant__buff_allocation$allocation)
+vacant_buff_id
+class(vacant__buff_allocation)
+col.index <- match(vacant__buff_allocation$allocation,unique(vacant__buff_allocation$allocation))
+col.alloc <- brewer.pal(5,'Accent')[col.index]
+par(mfrow=c(1,2))
+plot(vacant__buff_allocation,col=col.alloc)
+points(coordinates(vacant__buff_allocation),col=2)
+choropleth(vacant__buff_allocation,vacant__buff_allocation$allocdist)
+
+# allocations model with rail stops
+dir()
+rail <- st_read("Rail_Stations.shp")
+
+rail_coords <- do.call(rbind, st_geometry(rail)) %>%
+  as_tibble() %>% setNames(c("lon","lat"))
+?SpatialPoints
+rail_sp <- SpatialPoints(coords = rail_coords,
+                                  proj4string = CRS("+proj=tmerc +lat_0=40 +lon_0=-78.58333333333333 +k=0.9999375 +x_0=350000 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs") )
+
+
+save(rail_sp, file = "rail.Rdata")
+
+
+## No weighted distance
+
+
+allocation.a.1 <- allocations(risk_vacant_buff_sp, rail_sp, p = 1)
+id.a.1 <- unique(allocation.a.1$allocation)
+sites.a.1 <- risk_vacant_buff_sp[id.a.1,]
+total.a.1 <- sum(allocation.a.1$allocdist)
+
+
+
+allocation.a.2 <- allocations(risk_vacant_buff_sp, rail_sp, p = 2)
+id.a.2 <- unique(allocation.a.2$allocation)
+sites.a.2 <- risk_vacant_buff_sp[id.a.2,]
+total.a.2 <- sum(allocation.a.2$allocdist)
+
+
+
+allocation.a.3 <- allocations(risk_vacant_buff_sp, rail_sp,  p = 3)
+id.a.3 <- unique(allocation.a.3$allocation)
+sites.a.3 <- risk_vacant_buff_sp[id.a.3,]
+total.a.3 <- sum(allocation.a.3$allocdist)
+
+allocation.a.4 <- allocations(risk_vacant_buff_sp, rail_sp,  p = 4)
+id.a.4 <- unique(allocation.a.4$allocation)
+sites.a.4 <- risk_vacant_buff_sp[id.a.4,]
+total.a.4 <- sum(allocation.a.4$allocdist)
+
+allocation.a.5 <- allocations(risk_vacant_buff_sp, rail_sp,  p = 5)
+id.a.5 <- unique(allocation.a.5$allocation)
+sites.a.5 <- risk_vacant_buff_sp[id.a.5,]
+total.a.5 <- sum(allocation.a.5$allocdist)
+
+allocation.a.6 <- allocations(risk_vacant_buff_sp, rail_sp,  p = 6)
+id.a.6 <- unique(allocation.a.6$allocation)
+sites.a.6 <- risk_vacant_buff_sp[id.a.6,]
+total.a.6 <- sum(allocation.a.6$allocdist)
+
+allocation.a.7 <- allocations(risk_vacant_buff_sp, rail_sp,  p = 7)
+id.a.7 <- unique(allocation.a.7$allocation)
+sites.a.7 <- risk_vacant_buff_sp[id.a.7,]
+total.a.7 <- sum(allocation.a.7$allocdist)
+
+allocation.a.8 <- allocations(risk_vacant_buff_sp, rail_sp,  p = 8)
+id.a.8 <- unique(allocation.a.8$allocation)
+sites.a.8 <- risk_vacant_buff_sp[id.a.8,]
+total.a.8 <- sum(allocation.a.8$allocdist)
+
+allocation.a.9 <- allocations(risk_vacant_buff_sp, rail_sp,  p = 9)
+id.a.9 <- unique(allocation.a.9$allocation)
+sites.a.9 <- risk_vacant_buff_sp[id.a.9,]
+total.a.9 <- sum(allocation.a.9$allocdist)
+
+allocation.a.10 <- allocations(risk_vacant_buff_sp, rail_sp,  p = 10)
+id.a.10 <- unique(allocation.a.10$allocation)
+sites.a.10 <- risk_vacant_buff_sp[id.a.10,]
+total.a.10 <- sum(allocation.a.10$allocdist)
+
+allocation.a.11 <- allocations(risk_vacant_buff_sp, rail_sp,  p = 11)
+id.a.11 <- unique(allocation.a.11$allocation)
+sites.a.11 <- risk_vacant_buff_sp[id.a.11,]
+total.a.11 <- sum(allocation.a.11$allocdist)
+
+allocation.a.12 <- allocations(risk_vacant_buff_sp, rail_sp,  p = 12)
+id.a.12 <- unique(allocation.a.12$allocation)
+sites.a.12 <- risk_vacant_buff_sp[id.a.12,]
+total.a.12 <- sum(allocation.a.12$allocdist)
+
+allocation.a.13 <- allocations(risk_vacant_buff_sp, rail_sp,  p = 13)
+id.a.13 <- unique(allocation.a.13$allocation)
+sites.a.13 <- risk_vacant_buff_sp[id.a.13,]
+total.a.13 <- sum(allocation.a.13$allocdist)
+
+allocation.a.14 <- allocations(risk_vacant_buff_sp, rail_sp,  p = 14)
+id.a.14 <- unique(allocation.a.14$allocation)
+sites.a.14 <- risk_vacant_buff_sp[id.a.14,]
+total.a.14 <- sum(allocation.a.14$allocdist)
+
+tradeoff_matrix.a <- matrix(nrow = 14, c(1:14, total.a.1, total.a.2, total.a.3, total.a.4, total.a.5, total.a.6, total.a.7,
+                                         total.a.8, total.a.9, total.a.10, total.a.11, total.a.12, total.a.13, total.a.14))
+
+tradeoff_df.a <- as.data.frame(tradeoff_matrix.a)
+colnames(tradeoff_df.a) <- c("p", "Euclidean_Distance")
+
+tradeoff_plot.a <- ggplot(tradeoff_df.a, mapping = aes(p, Euclidean_Distance)) +
+  geom_line() +
+  scale_x_continuous(breaks = c(1:15)) +
+  labs(x = "Number of Facilities", y = "Euclidean Distance", title = "Tradeoff Curve")
+
+tradeoff_plot.a
+
+
+### Weighted by percentage take public transit
+
+PT_matrix <- as.matrix(risk_vacant_buff_sp$Per_Public_Trans_16 *euc.dists(risk_vacant_buff_sp))
+
+PT.1 <- allocations(risk_vacant_buff_sp, rail_sp, p = 1, metric = PT_matrix)
+PT_id.1 <- unique(PT.1$allocation)
+sites.c.1 <- PT.1[PT_id.1,]
+total.c.1 <- sum(PT.1$allocdist)
+
+PT.2 <- allocations(risk_vacant_buff_sp, rail_sp, p = 2, metric = PT_matrix)
+PT_id.2 <- unique(PT.2$allocation)
+sites.c.2 <- PT.1[PT_id.2,]
+total.c.2 <- sum(PT.2$allocdist)
+
+PT.3 <- allocations(risk_vacant_buff_sp, rail_sp, p = 3, metric = PT_matrix)
+PT_id.3 <- unique(PT.3$allocation)
+sites.c.3 <- PT.1[PT_id.3,]
+total.c.3 <- sum(PT.3$allocdist)
+
+PT.4 <- allocations(risk_vacant_buff_sp, rail_sp, p = 4, metric = PT_matrix)
+PT_id.4 <- unique(PT.4$allocation)
+sites.c.4 <- PT.4[PT_id.4,]
+total.c.4 <- sum(PT.4$allocdist)
+
+PT.5 <- allocations(risk_vacant_buff_sp, rail_sp, p = 5, metric = PT_matrix)
+PT_id.5 <- unique(PT.5$allocation)
+sites.c.5 <- PT.5[PT_id.5,]
+total.c.5 <- sum(PT.5$allocdist)
+
+PT.6 <- allocations(risk_vacant_buff_sp, rail_sp, p = 6, metric = PT_matrix)
+PT_id.6 <- unique(PT.6$allocation)
+sites.c.6 <- PT.6[PT_id.6,]
+total.c.6 <- sum(PT.6$allocdist)
+
+PT.7 <- allocations(risk_vacant_buff_sp, rail_sp, p = 7, metric = PT_matrix)
+PT_id.7 <- unique(PT.7$allocation)
+sites.c.7 <- PT.1[PT_id.7,]
+total.c.7 <- sum(PT.7$allocdist)
+
+PT.8 <- allocations(risk_vacant_buff_sp, rail_sp, p = 8, metric = PT_matrix)
+PT_id.8 <- unique(PT.8$allocation)
+sites.c.8 <- PT.8[PT_id.8,]
+total.c.8 <- sum(PT.8$allocdist)
+
+PT.9 <- allocations(risk_vacant_buff_sp, rail_sp, p = 9, metric = PT_matrix)
+PT_id.9 <- unique(PT.9$allocation)
+sites.c.9 <- PT.9[PT_id.9,]
+total.c.9 <- sum(PT.9$allocdist)
+
+PT.10 <- allocations(risk_vacant_buff_sp, rail_sp, p = 10, metric = PT_matrix)
+PT_id.10 <- unique(PT.10$allocation)
+sites.c.10 <- PT.10[PT_id.10,]
+total.c.10 <- sum(PT.10$allocdist)
+
+PT.11 <- allocations(risk_vacant_buff_sp, rail_sp, p = 11, metric = PT_matrix)
+PT_id.11 <- unique(PT.11$allocation)
+sites.c.11 <- PT.11[PT_id.11,]
+total.c.11 <- sum(PT.11$allocdist)
+
+PT.12 <- allocations(risk_vacant_buff_sp, rail_sp, p = 12, metric = PT_matrix)
+PT_id.12 <- unique(PT.12$allocation)
+sites.c.12 <- PT.12[PT_id.12,]
+total.c.12 <- sum(PT.12$allocdist)
+
+PT.13 <- allocations(risk_vacant_buff_sp, rail_sp, p = 13, metric = PT_matrix)
+PT_id.13 <- unique(PT.13$allocation)
+sites.c.13 <- PT.13[PT_id.13,]
+total.c.13 <- sum(PT.13$allocdist)
+
+PT.14 <- allocations(risk_vacant_buff_sp, rail_sp, p = 14, metric = PT_matrix)
+PT_id.14 <- unique(PT.14$allocation)
+sites.c.14 <- PT.14[PT_id.14,]
+total.c.14 <- sum(PT.14$allocdist)
+
+# Tradeoff Curve for Public Transportation
+
+tradeoff_matrix.c <- matrix(nrow = 14, c(1:14, total.c.1, total.c.2, total.c.3, total.c.4, total.c.5, total.c.6, total.c.7,
+                                         total.c.8, total.c.9, total.c.10, total.c.11, total.c.12, total.c.13, total.c.14))
+
+tradeoff_df.c <- as.data.frame(tradeoff_matrix.c)
+colnames(tradeoff_df.c) <- c("p", "Public_Trans")
+
+tradeoff_plot.c <- ggplot(tradeoff_df.c, mapping = aes(p, Public_Trans)) +
+  geom_line() +
+  scale_x_continuous(breaks = c(1:14)) +
+  labs(x = "Number of Facilities", y = "Distance Weighted Public Transit (%)", title = "Tradeoff Curve")
+
+tradeoff_plot.c
+
+## weighted by value added from regression
+
+VA_matrix <- as.matrix(risk_vacant_buff_sp$value_added *euc.dists(risk_vacant_buff_sp))
+
+VA.1 <- allocations(risk_vacant_buff_sp, rail_sp, p = 1, metric = VA_matrix)
+VA_id.1 <- unique(VA.1$allocation)
+sites.d.1 <- VA.1[VA_id.1,]
+total.d.1 <- sum(VA.1$allocdist)
+
+VA.2 <- allocations(risk_vacant_buff_sp, rail_sp, p = 2, metric = VA_matrix)
+VA_id.2 <- unique(VA.2$allocation)
+sites.d.2 <- VA.2[VA_id.2,]
+total.d.2 <- sum(VA.2$allocdist)
+
+VA.3 <- allocations(risk_vacant_buff_sp, rail_sp, p = 3, metric = VA_matrix)
+VA_id.3 <- unique(VA.3$allocation)
+sites.d.3 <- VA.3[VA_id.3,]
+total.d.3 <- sum(VA.3$allocdist)
+
+VA.4 <- allocations(risk_vacant_buff_sp, rail_sp, p = 4, metric = VA_matrix)
+VA_id.4 <- unique(VA.4$allocation)
+sites.d.4 <- VA.4[VA_id.4,]
+total.d.4 <- sum(VA.4$allocdist)
+
+VA.4 <- allocations(risk_vacant_buff_sp, rail_sp, p = 4, metric = VA_matrix)
+VA_id.4 <- unique(VA.4$allocation)
+sites.d.4 <- VA.4[VA_id.4,]
+total.d.4 <- sum(VA.4$allocdist)
+
+VA.5 <- allocations(risk_vacant_buff_sp, rail_sp, p = 5, metric = VA_matrix)
+VA_id.5 <- unique(VA.5$allocation)
+sites.d.5 <- VA.5[VA_id.5,]
+total.d.5 <- sum(VA.5$allocdist)
+
+VA.6 <- allocations(risk_vacant_buff_sp, rail_sp, p = 6, metric = VA_matrix)
+VA_id.6 <- unique(VA.6$allocation)
+sites.d.6 <- VA.6[VA_id.6,]
+total.d.6 <- sum(VA.6$allocdist)
+
+VA.7 <- allocations(risk_vacant_buff_sp, rail_sp, p = 7, metric = VA_matrix)
+VA_id.7 <- unique(VA.7$allocation)
+sites.d.7 <- VA.7[VA_id.7,]
+total.d.7 <- sum(VA.7$allocdist)
+
+VA.8 <- allocations(risk_vacant_buff_sp, rail_sp, p = 8, metric = VA_matrix)
+VA_id.8 <- unique(VA.8$allocation)
+sites.d.8 <- VA.8[VA_id.8,]
+total.d.8 <- sum(VA.8$allocdist)
+
+VA.9 <- allocations(risk_vacant_buff_sp, rail_sp, p = 9, metric = VA_matrix)
+VA_id.9 <- unique(VA.9$allocation)
+sites.d.9 <- VA.9[VA_id.9,]
+total.d.9 <- sum(VA.9$allocdist)
+
+VA.10 <- allocations(risk_vacant_buff_sp, rail_sp, p = 10, metric = VA_matrix)
+VA_id.10 <- unique(VA.10$allocation)
+sites.d.10 <- VA.10[VA_id.10,]
+total.d.10 <- sum(VA.10$allocdist)
+
+VA.11 <- allocations(risk_vacant_buff_sp, rail_sp, p = 11, metric = VA_matrix)
+VA_id.11 <- unique(VA.11$allocation)
+sites.d.11 <- VA.11[VA_id.11,]
+total.d.11 <- sum(VA.11$allocdist)
+
+VA.12 <- allocations(risk_vacant_buff_sp, rail_sp, p = 12, metric = VA_matrix)
+VA_id.12 <- unique(VA.12$allocation)
+sites.d.12 <- VA.12[VA_id.12,]
+total.d.12 <- sum(VA.12$allocdist)
+
+VA.13 <- allocations(risk_vacant_buff_sp, rail_sp, p = 13, metric = VA_matrix)
+VA_id.13 <- unique(VA.13$allocation)
+sites.d.13 <- PT.13[VA_id.13,]
+total.d.13 <- sum(VA.13$allocdist)
+
+VA.14 <- allocations(risk_vacant_buff_sp, rail_sp, p = 14, metric = VA_matrix)
+VA_id.14 <- unique(VA.14$allocation)
+sites.d.14 <- VA.14[VA_id.14,]
+total.d.14 <- sum(VA.14$allocdist)
+
+# Tradeoff curve weighted by value added
+
+tradeoff_matrix.d <- matrix(nrow = 14, c(1:14, total.d.1, total.d.2, total.d.3, total.d.4, total.d.5, total.d.6, total.d.7,
+                                         total.d.8, total.d.9, total.d.10, total.d.11, total.d.12, total.d.13, total.d.14))
+
+tradeoff_df.d <- as.data.frame(tradeoff_matrix.d)
+colnames(tradeoff_df.d) <- c("p", "value_added")
+
+tradeoff_plot.d <- ggplot(tradeoff_df.d, mapping = aes(p, value_added)) +
+  geom_line() +
+  scale_x_continuous(breaks = c(1:14)) +
+  labs(x = "Number of Facilities", y = "Distance Weighted Value Added ($)", title = "Tradeoff Curve")
+
+tradeoff_plot.d
+
+## weighted by displacement risk
+
+DR_matrix <- as.matrix(risk_vacant_buff_sp$risk *euc.dists(risk_vacant_buff_sp))
+
+DR.1 <- allocations(risk_vacant_buff_sp, rail_sp, p = 1, metric = DR_matrix)
+DR_id.1 <- unique(DR.1$allocation)
+sites.e.1 <- DR.1[DR_id.1,]
+total.e.1 <- sum(DR.1$allocdist)
+
+DR.2 <- allocations(risk_vacant_buff_sp, rail_sp, p = 2, metric = DR_matrix)
+DR_id.2 <- unique(DR.2$allocation)
+sites.e.2 <- DR.2[DR_id.2,]
+total.e.2 <- sum(DR.2$allocdist)
+
+DR.3 <- allocations(risk_vacant_buff_sp, rail_sp, p = 3, metric = DR_matrix)
+DR_id.3 <- unique(DR.3$allocation)
+sites.e.3 <- DR.3[DR_id.3,]
+total.e.3 <- sum(DR.3$allocdist)
+
+DR.4 <- allocations(risk_vacant_buff_sp, rail_sp, p = 4, metric = DR_matrix)
+DR_id.4 <- unique(DR.4$allocation)
+sites.e.4 <- DR.4[DR_id.4,]
+total.e.4 <- sum(DR.4$allocdist)
+
+DR.5 <- allocations(risk_vacant_buff_sp, rail_sp, p = 5, metric = DR_matrix)
+DR_id.5 <- unique(DR.5$allocation)
+sites.e.5 <- DR.5[DR_id.5,]
+total.e.5 <- sum(DR.5$allocdist)
+
+DR.6 <- allocations(risk_vacant_buff_sp, rail_sp, p = 6, metric = DR_matrix)
+DR_id.6 <- unique(DR.6$allocation)
+sites.e.6 <- DR.6[DR_id.6,]
+total.e.6 <- sum(DR.6$allocdist)
+
+DR.7 <- allocations(risk_vacant_buff_sp, rail_sp, p = 7, metric = DR_matrix)
+DR_id.7 <- unique(DR.7$allocation)
+sites.e.7 <- DR.7[DR_id.7,]
+total.e.7 <- sum(DR.7$allocdist)
+
+DR.8 <- allocations(risk_vacant_buff_sp, rail_sp, p = 8, metric = DR_matrix)
+DR_id.8 <- unique(DR.8$allocation)
+sites.e.8 <- DR.8[DR_id.8,]
+total.e.8 <- sum(DR.8$allocdist)
+
+DR.9 <- allocations(risk_vacant_buff_sp, rail_sp, p = 9, metric = DR_matrix)
+DR_id.9 <- unique(DR.9$allocation)
+sites.e.9 <- DR.9[DR_id.9,]
+total.e.9 <- sum(DR.9$allocdist)
+
+DR.10 <- allocations(risk_vacant_buff_sp, rail_sp, p = 10, metric = DR_matrix)
+DR_id.10 <- unique(DR.10$allocation)
+sites.e.10 <- DR.10[DR_id.10,]
+total.e.10 <- sum(DR.10$allocdist)
+
+DR.11 <- allocations(risk_vacant_buff_sp, rail_sp, p = 11, metric = DR_matrix)
+DR_id.11 <- unique(DR.11$allocation)
+sites.e.11 <- DR.11[DR_id.11,]
+total.e.11 <- sum(DR.11$allocdist)
+
+DR.12 <- allocations(risk_vacant_buff_sp, rail_sp, p = 12, metric = DR_matrix)
+DR_id.12 <- unique(DR.12$allocation)
+sites.e.12 <- DR.12[DR_id.12,]
+total.e.12 <- sum(DR.12$allocdist)
+
+DR.13 <- allocations(risk_vacant_buff_sp, rail_sp, p = 13, metric = DR_matrix)
+DR_id.13 <- unique(DR.13$allocation)
+sites.e.13 <- DR.13[DR_id.13,]
+total.e.13 <- sum(DR.13$allocdist)
+
+DR.14 <- allocations(risk_vacant_buff_sp, rail_sp, p = 14, metric = DR_matrix)
+DR_id.14 <- unique(DR.14$allocation)
+sites.e.14 <- DR.14[DR_id.14,]
+total.e.14 <- sum(DR.14$allocdist)
+
+# Tradeoff curve for weighted by displacement risk
+
+tradeoff_matrix.e <- matrix(nrow = 14, c(1:14, total.e.1, total.e.2, total.e.3, total.e.4, total.e.5, total.e.6, total.e.7,
+                                         total.e.8, total.e.9, total.e.10, total.e.11, total.e.12, total.e.13, total.e.14))
+
+tradeoff_df.e <- as.data.frame(tradeoff_matrix.e)
+colnames(tradeoff_df.e) <- c("p", "DR")
+
+tradeoff_plot.e <- ggplot(tradeoff_df.e, mapping = aes(p, DR)) +
+  geom_line() +
+  scale_x_continuous(breaks = c(1:14)) +
+  labs(x = "Number of Facilities", y = "Distance Weighted Displacment Risk ($)", title = "Tradeoff Curve")
+
+tradeoff_plot.e
+
+## all optimal sites
+
+?allocate
+
+
+## Map for 14 sites
+
+
+DR_p.14_labels <- sprintf(
+  "<strong>%g Total Value</strong>",
+  DR.14$TOTAL.VALUE) %>% lapply(htmltools::HTML)
+
+VA_p.14_labels <- sprintf(
+  "<strong>%g Total Value</strong>",
+  VA.14$TOTAL.VALUE) %>% lapply(htmltools::HTML)
+
+PT_p.14_labels <- sprintf(
+  "<strong>%g Total Value</strong>",
+  PT.14$TOTAL.VALUE) %>% lapply(htmltools::HTML)
+
+a_p.14_labels <- sprintf(
+  "<strong>%g Total Value</strong>",
+  allocation.a.14$TOTAL.VALUE) %>% lapply(htmltools::HTML)
+
+
+p.14_map <- leaflet() %>% setView(-78.8784, 42.8864, 10.9) %>% addTiles() %>%
+  addCircleMarkers(data = DR.14,
+                   lng = DR.14$LONGITUDE,
+                   lat = DR.14$LATITUDE,
+                   radius = 2,
+                   fillOpacity = .7,
+                   color = "Black",
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "Potential Sites") %>%
+  addCircleMarkers(data = sites.e.14,
+                   lng = sites.e.14$LONGITUDE,
+                   lat = sites.e.14$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "Displacement Risk") %>%
+  addCircleMarkers(data = sites.d.14,
+                   lng = sites.d.14$LONGITUDE,
+                   lat = sites.d.14$LATITUDE,
+                   radius = 4,
+                   color = "#FF7F00",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = VA_p.14_labels,
+                   group = "Value Added") %>%
+  addCircleMarkers(data = sites.c.14,
+                   lng = sites.c.14$LONGITUDE,
+                   lat = sites.c.14$LATITUDE,
+                   radius = 4,
+                   color = "#00FF00",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = PT_p.14_labels,
+                   group = "Public Transportation") %>%
+  addCircleMarkers(data = sites.a.14,
+                   lng = sites.a.14$LONGITUDE,
+                   lat = sites.a.14$LATITUDE,
+                   radius = 4,
+                   color = "#0000FF",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = a_p.14_labels,
+                   group = "Euclidean Distance") %>%
+   addLayersControl(baseGroups = "Potential Sites",
+     overlayGroups = c("Displacement Risk","Value Added", "Public Transportation", "Euclidean Distance"),
+                   options = layersControlOptions(collapsed = FALSE))
+
+
+p.14_map
+
+p.7_map <- leaflet() %>% setView(-78.8784, 42.8864, 10.9) %>% addTiles() %>%
+  addCircleMarkers(data = DR.7,
+                   lng = DR.7$LONGITUDE,
+                   lat = DR.7$LATITUDE,
+                   radius = 2,
+                   fillOpacity = .7,
+                   color = "Black",
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "Potential Sites") %>%
+  addCircleMarkers(data = sites.e.7,
+                   lng = sites.e.7$LONGITUDE,
+                   lat = sites.e.7$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "Displacement Risk") %>%
+  addCircleMarkers(data = sites.d.7,
+                   lng = sites.d.7$LONGITUDE,
+                   lat = sites.d.7$LATITUDE,
+                   radius = 4,
+                   color = "#FF7F00",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = VA_p.14_labels,
+                   group = "Value Added") %>%
+  addCircleMarkers(data = sites.c.7,
+                   lng = sites.c.7$LONGITUDE,
+                   lat = sites.c.7$LATITUDE,
+                   radius = 4,
+                   color = "#00FF00",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = PT_p.14_labels,
+                   group = "Public Transportation") %>%
+  addCircleMarkers(data = sites.a.7,
+                   lng = sites.a.7$LONGITUDE,
+                   lat = sites.a.7$LATITUDE,
+                   radius = 4,
+                   color = "#0000FF",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = a_p.14_labels,
+                   group = "Euclidean Distance") %>%
+  addLayersControl(baseGroups = "Potential Sites",
+                   overlayGroups = c("Displacement Risk","Value Added", "Public Transportation", "Euclidean Distance"),
+                   options = layersControlOptions(collapsed = FALSE))
+
+
+p.7_map
+
+## Map for displacement risk
+
+
+DR_p.14_labels <- sprintf(
+  "<strong>%g Total Value</strong>",
+  DR.14$TOTAL.VALUE) %>% lapply(htmltools::HTML)
+
+VA_p.14_labels <- sprintf(
+  "<strong>%g Total Value</strong>",
+  VA.14$TOTAL.VALUE) %>% lapply(htmltools::HTML)
+
+PT_p.14_labels <- sprintf(
+  "<strong>%g Total Value</strong>",
+  PT.14$TOTAL.VALUE) %>% lapply(htmltools::HTML)
+
+a_p.14_labels <- sprintf(
+  "<strong>%g Total Value</strong>",
+  allocation.a.14$TOTAL.VALUE) %>% lapply(htmltools::HTML)
+
+
+DR_all_map <- leaflet() %>% setView(-78.8784, 42.8864, 10.9) %>% addTiles() %>%
+  addCircleMarkers(data = DR.7,
+                   lng = DR.7$LONGITUDE,
+                   lat = DR.7$LATITUDE,
+                   radius = 2,
+                   fillOpacity = .7,
+                   color = "Black",
+                   stroke = FALSE,
+                   group = "Potential Sites") %>%
+  addCircleMarkers(data = sites.e.1,
+                   lng = sites.e.1$LONGITUDE,
+                   lat = sites.e.1$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 1") %>%
+  addCircleMarkers(data = sites.e.2,
+                   lng = sites.e.2$LONGITUDE,
+                   lat = sites.e.2$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 2") %>%
+  addCircleMarkers(data = sites.e.3,
+                   lng = sites.e.3$LONGITUDE,
+                   lat = sites.e.3$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 3") %>%
+  addCircleMarkers(data = sites.e.4,
+                   lng = sites.e.4$LONGITUDE,
+                   lat = sites.e.4$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 4") %>%
+  addCircleMarkers(data = sites.e.5,
+                   lng = sites.e.5$LONGITUDE,
+                   lat = sites.e.5$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 5") %>%
+  addCircleMarkers(data = sites.e.6,
+                   lng = sites.e.6$LONGITUDE,
+                   lat = sites.e.6$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 6") %>%
+  addCircleMarkers(data = sites.e.7,
+                   lng = sites.e.7$LONGITUDE,
+                   lat = sites.e.7$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 7") %>%
+  addCircleMarkers(data = sites.e.8,
+                   lng = sites.e.8$LONGITUDE,
+                   lat = sites.e.8$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 8") %>%
+  addCircleMarkers(data = sites.e.9,
+                   lng = sites.e.9$LONGITUDE,
+                   lat = sites.e.9$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 9") %>%
+  addCircleMarkers(data = sites.e.10,
+                   lng = sites.e.10$LONGITUDE,
+                   lat = sites.e.10$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 10") %>%
+  addCircleMarkers(data = sites.e.11,
+                   lng = sites.e.11$LONGITUDE,
+                   lat = sites.e.11$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 11") %>%
+  addCircleMarkers(data = sites.e.12,
+                   lng = sites.e.12$LONGITUDE,
+                   lat = sites.e.12$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 12") %>%
+  addCircleMarkers(data = sites.e.13,
+                   lng = sites.e.13$LONGITUDE,
+                   lat = sites.e.13$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 13") %>%
+  addCircleMarkers(data = sites.e.14,
+                   lng = sites.e.14$LONGITUDE,
+                   lat = sites.e.14$LATITUDE,
+                   radius = 4,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   label = DR_p.14_labels,
+                   group = "p = 14") %>%
+  addLayersControl(baseGroups = "Potential Sites",
+                   overlayGroups = c("p = 1", "p = 2", "p = 3",
+                                     "p = 4", "p = 5", "p = 6",
+                                     "p = 7", "p = 8", "p = 9",
+                                     "p = 10", "p = 11", "p = 12",
+                                     "p = 13", "p = 14"),
+                   options = layersControlOptions(collapsed = TRUE))
+
+
+DR_all_map
+
+
+
+
+
+leaflet() %>% setView(-78.8784, 42.8864, 10.9) %>% addTiles() %>%
+  addCircleMarkers(data = vacant_rail_allocation,
+                   lng = vacant_rail_allocation$LONGITUDE,
+                   lat = vacant_rail_allocation$LATITUDE,
+                   radius = 3,
+                   fillOpacity = .7,
+                   stroke = FALSE,
+                   group = "potential sites") %>%
+  addCircleMarkers(data = best_sites.5,
+                   lng = best_sites.5$LONGITUDE,
+                   lat = best_sites.5$LATITUDE,
+                   radius = 6,
+                   color = "Red",
+                   fillOpacity = .9,
+                   stroke = FALSE,
+                   group = "best sites")
+  
+
+# Merge vacant change df with buffalo 2016 census data
+buff_2016 <- as.data.frame(buffalo_2016_df)
+vacant_all <- full_join(vacant_change, buff_2016, by = c("GEOID10"="GEOID10"))
+colnames(vacant_all)
+# Clean for unneeded data
+vacant_all$per_6
+
+vacant_all_new <- vacant_all[,c(1:46,50,56:78,82,91:193)]
+colnames(vacant_all_new)
+# Load rail stops into workspace
+
+rail_stops <- st_read("Rail_Stations.shp")
+
+# Change CRS of rail stops to match vacant parcels
+
+rail_crs <- rail_stops %>% st_transform("+proj=tmerc +lat_0=40 +lon_0=-78.58333333333333 +k=0.9999375+x_0=350000 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs")
+st_crs(rail_crs) <- 32117
+
+
