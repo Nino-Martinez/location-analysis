@@ -656,7 +656,7 @@ tradeoff_plot.e
 
 ## all optimal sites
 
-?allocate
+
 
 
 ## Map for 14 sites
